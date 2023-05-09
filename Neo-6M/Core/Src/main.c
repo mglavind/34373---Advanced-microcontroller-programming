@@ -18,6 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -26,23 +29,56 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-  HAL_StatusTypeDef ret = HAL_OK; // This is for use in a Clear buffer function, to check if Uart is ready.
-  char cmd[100] = "command \r\n";
-  char TermMsg[100] = "Message to terminal \r\n";
-  uint8_t RecievedData[700] = {0};
-  uint8_t c[2] = {0};
+	HAL_StatusTypeDef ret = HAL_OK; // This is for use in a Clear buffer function, to check if Uart is ready.
+	char cmd[100] = "command \r\n";
+	char TermMsg[100] = "Message to terminal \r\n";
+	uint8_t RecievedData[700] = {0};
+	uint8_t c[2] = {0};
+
+
+
+	float WakeupTimebase = 16.0 / 32.0; 	// or (float)16 / (float)32
+	float SleepTimeSeconds = 60.0; 		// Here the sleep time is defined in seconds
+	float WakeUpCounter; 					// The counter is defined, but cannot be calculated before main()
+	char WakeUpCounterHex[10]; 			// The hex string for the counter is defined
+	uint32_t WakeUpCounterUint;
+
+
+
+
+	#define MAX_MSG_LENGTH 100
+
+	typedef struct {
+		float altitude;
+		float latitude;
+		char latitudeArea;
+		float longitude;
+		char longitudeArea;
+		int fix;
+	} GPSData;
+
+
+	char buffer[50];
+	int len;
+
+	int GoToSleep = 0;
+	int DataReadyForTx = 0;
+
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 /* USER CODE END PD */
-kmfkemfkmkefmkemfkm
+
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+RTC_HandleTypeDef hrtc;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
@@ -55,8 +91,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
-
+void parseNMEA(char* msg, GPSData* data);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -71,6 +108,8 @@ static void MX_USART2_UART_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+	WakeUpCounter = SleepTimeSeconds / WakeupTimebase; 	// Wakeup counter is calculated now
+	WakeUpCounterUint = (uint32_t)WakeUpCounter; // The Wakeup counter is converted to hex
 
   /* USER CODE END 1 */
 
@@ -87,6 +126,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  void ClearBuffer(void);
 
   /* USER CODE END SysInit */
 
@@ -94,7 +134,39 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  GPSData gpsData; // Laver et instance af vores struct
+
+
+
+
+// When waking up
+  if (__HAL_PWR_GET_FLAG(PWR_FLAG_SB) != RESET)
+    {
+  	  __HAL_PWR_CLEAR_FLAG(PWR_FLAG_SB);  // clear the flag
+
+  	  /** display  the string **/
+  	  char *str = "Wakeup from the STANDBY MODE\n\n";
+  	  HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen (str), HAL_MAX_DELAY);
+
+  	  /** Blink the LED **/
+  	  for (int i=0; i<20; i++)
+  	  {
+  		  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+  		  HAL_Delay(200);
+  	  }
+
+  	  /** Disable the WWAKEUP PIN **/
+  	  HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN1);  // disable PA0
+
+  	  /** Deactivate the RTC wakeup  **/
+  	  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+    }
+
+
+
+
 
   ClearBuffer();
   /* USER CODE END 2 */
@@ -109,8 +181,23 @@ int main(void)
 
 	  //HAL_Delay(3000);
 	  //HAL_UART_Transmit(&huart2, (uint8_t*)". ", 2, 10);
-	  ClearBuffer();
-	  HAL_UART_Receive_IT(&huart1, RecievedData, 700);
+	  //ClearBuffer();
+	  //HAL_UART_Receive_IT(&huart1, RecievedData, 700);
+
+
+	  if (gpsData.fix){
+		  // if fix = 1, har vi en position, og vi kan sende vores position
+		  // Power down af GPS?
+		  char *str = "We got a fix! \r\n";
+		  HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen (str), HAL_MAX_DELAY);
+		  // Handle Lora, Sæt GoToSleep til 1, hvis success med Tx.
+
+	  }
+
+	  if (GoToSleep) {
+		  EnterStandbyMode();
+	  }
+
   }
   /* USER CODE END 3 */
 }
@@ -125,10 +212,16 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -152,12 +245,55 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_RTC;
   PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK1;
+  PeriphClkInit.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Enable the WakeUp
+  */
+  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 0, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
 }
 
 /**
@@ -248,11 +384,11 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  /*Configure GPIO pin : B1_Pin_Pin */
+  GPIO_InitStruct.Pin = B1_Pin_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(B1_Pin_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
@@ -261,6 +397,54 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+}
+
+void parseNMEA(char* msg, GPSData* data) {
+    char* token;
+    token = strtok(msg, ",");
+    int count = 0;
+
+    // Check the first token for "$GPGGA"
+    if (strcmp(token, "$GPGGA") != 0) {
+        len = snprintf(buffer, sizeof(buffer), "unknown NMEA message \n");
+        HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+        return;
+    }
+
+    while (token != NULL) {
+        count++;
+        switch (count) {
+            case 2:
+                // Process altitude value
+                data->altitude = atof(token);
+                break;
+            case 3:
+                // Process latitude value
+                data->latitude = atof(token);
+                break;
+            case 4:
+                // Process latitude area value
+                data->latitudeArea = token[0];
+                break;
+            case 5:
+                // Process longitude value
+                data->longitude = atof(token);
+                break;
+            case 6:
+                // Process longitude area value
+                data->longitudeArea = token[0];
+                break;
+            case 7:
+                // Process fix value
+                data->fix = atoi(token);
+                break;
+        }
+        token = strtok(NULL, ",");
+    }
 }
 
 /* USER CODE BEGIN 4 */
@@ -271,6 +455,34 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	HAL_UART_Transmit(&huart2, (uint8_t*)"Interrupt received data: ", 25, 100);
 	HAL_UART_Transmit(&huart2, RecievedData,  strlen(RecievedData), 100);
 	HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n\r\n", 2, 100);
+
+
+	GPSData gpsData; // Laver et instance af vores struct
+	parseNMEA(RecievedData, &gpsData);
+	// Access the parsed values
+	// Altitude
+	len = snprintf(buffer, sizeof(buffer), "Altitude: %.2f\r\n", gpsData.altitude);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+	// Latitude
+	len = snprintf(buffer, sizeof(buffer), "Latitude: %.5f\r\n", gpsData.latitude);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+	// Latitude Area
+	len = snprintf(buffer, sizeof(buffer), "Latitude Area: %c\r\n", gpsData.latitudeArea);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+	// Longitude
+	len = snprintf(buffer, sizeof(buffer), "Longitude: %.5f\r\n", gpsData.longitude);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+	// Longitude Area
+	len = snprintf(buffer, sizeof(buffer), "Longitude Area: %c\r\n", gpsData.longitudeArea);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+	// Fix
+	len = snprintf(buffer, sizeof(buffer), "Fix: %d\r\n", gpsData.fix);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
 	memset(RecievedData,0, 30);
 	HAL_UART_Receive_IT (&huart1, RecievedData, 30);		//re-starting interrupt
 	}
@@ -284,6 +496,44 @@ void ClearBuffer(void){
 	while (ret != HAL_TIMEOUT) ret = HAL_UART_Receive(&huart1, c, 1, 100);	//RN2483 serial
 }
 
+
+
+void EnterStandbyMode(void) {
+
+    /** Now enter the standby mode **/
+     /* Clear the WU FLAG */
+    __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+
+     /* clear the RTC Wake UP (WU) flag */
+    __HAL_RTC_WAKEUPTIMER_CLEAR_FLAG(&hrtc, RTC_FLAG_WUTF);
+
+     /* Display the string */
+    char *str = "About to enter the STANDBY MODE\n\n";
+    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen (str), HAL_MAX_DELAY);
+
+     /* Blink the LED */
+    for (int i=0; i<5; i++)
+    {
+  	  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+  	  HAL_Delay(750);
+    }
+
+     /* Enable the WAKEUP PIN */
+    //HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1);
+
+    if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, WakeUpCounterUint, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+     /* one last string to be sure */
+    char *str2 = "STANDBY MODE is ON\n\n";
+    HAL_UART_Transmit(&huart2, (uint8_t *)str2, strlen (str2), HAL_MAX_DELAY);
+
+     /* Finally enter the standby mode */
+    HAL_PWR_EnterSTANDBYMode();
+
+}
 
 void SendCommand(void)
 {
